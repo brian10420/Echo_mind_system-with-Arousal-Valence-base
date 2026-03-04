@@ -1,0 +1,86 @@
+======================================================================
+IEMOCAP DATASET EXPLORATION REPORT
+======================================================================
+
+1. OVERVIEW
+   Total utterances:         10039
+   With audio (wav):         10039
+   With transcript:          10039
+   With both (audio+text):   10039
+
+2. RAW EMOTION DISTRIBUTION (all 10039 utterances)
+   No Agreement      2507  ( 25.0%)  ████████████
+   Frustrated        1849  ( 18.4%)  █████████
+   Neutral           1708  ( 17.0%)  ████████
+   Angry             1103  ( 11.0%)  █████
+   Sad               1084  ( 10.8%)  █████
+   Excited           1041  ( 10.4%)  █████
+   Happy              595  (  5.9%)  ██
+   Surprised          107  (  1.1%)  
+   Fearful             40  (  0.4%)  
+   Other                3  (  0.0%)  
+   Disgusted            2  (  0.0%)  
+
+3. STANDARD 4-CLASS DISTRIBUTION (for paper benchmarks)
+   Neutral           1708  ( 30.9%)  ███████████████
+   Happy             1636  ( 29.6%)  ██████████████
+   Angry             1103  ( 19.9%)  █████████
+   Sad               1084  ( 19.6%)  █████████
+   TOTAL             5531
+   Imbalance ratio (max/min): 1.58x
+
+4. STANDARD 6-CLASS DISTRIBUTION
+   Frustrated        1849  ( 25.1%)
+   Neutral           1708  ( 23.1%)
+   Angry             1103  ( 14.9%)
+   Sad               1084  ( 14.7%)
+   Excited           1041  ( 14.1%)
+   Happy              595  (  8.1%)
+
+5. PER-SESSION BREAKDOWN (for LOSO cross-validation)
+   Session1: 1819 utterances
+   Session2: 1811 utterances
+   Session3: 2136 utterances
+   Session4: 2103 utterances
+   Session5: 2170 utterances
+
+6. AUDIO DURATION STATISTICS
+   Count:         10039
+   Total hours:   12.44 h
+   Mean:          4.46 s
+   Std:           3.06 s
+   Min:           0.58 s
+   Median:        3.52 s
+   P75:           5.71 s
+   P95:           10.53 s
+   Max:           34.14 s
+
+   → Design hint: Set max_audio_length to ~11s (P95) for training
+
+7. VALENCE-AROUSAL-DOMINANCE STATISTICS (scale: 1-5)
+   Valence       mean=2.778  std=0.897  range=[1.00, 5.50]
+   Arousal       mean=3.090  std=0.702  range=[1.00, 5.00]
+   Dominance     mean=3.194  std=0.789  range=[0.50, 5.00]
+   V-A correlation:  0.005
+
+   → Design hint: V-A are weakly correlated
+
+8. DIALOG TYPE BREAKDOWN
+   scripted          5255  (52.3%)
+   improvised        4784  (47.7%)
+
+9. SPEAKER GENDER BREAKDOWN
+   Male              5239
+   Female            4800
+
+10. TEXT LENGTH STATISTICS (word count)
+   Mean:    11.6 words
+   Median:  8 words
+   P95:     32 words
+   Max:     100 words
+
+   → Design hint: Set max_text_tokens to ~48 (P95 × 1.5 for subword expansion)
+
+======================================================================
+END OF REPORT
+======================================================================

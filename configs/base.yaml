@@ -1,0 +1,90 @@
+# ============================================================
+# Echo-Mind System — Base Configuration
+# ============================================================
+# All hyperparameters in one place. Override via command line:
+#   python main.py --config configs/base.yaml --model late_fusion
+# ============================================================
+
+# --- Paths ---
+paths:
+  iemocap_root: "/data/Brian/Dataset/IEMOCAP_full_release"
+  output_dir: "./outputs"
+  cache_dir: "./cache"          # for HuggingFace model cache
+
+# --- Dataset ---
+dataset:
+  num_classes: 4                 # 4-class: Angry, Happy+Excited, Sad, Neutral
+  max_audio_sec: 11.0            # P95 from analysis
+  audio_sample_rate: 16000       # Wav2Vec2.0 requirement
+  max_text_tokens: 48            # P95 × 1.5 from analysis
+  label_map:                     # raw IEMOCAP label → class index
+    ang: 0
+    hap: 1
+    exc: 1                       # merged with happy
+    sad: 2
+    neu: 3
+
+# --- Audio Encoder ---
+audio_encoder:
+  name: "wav2vec2"               # or "emotion2vec"
+  model_id: "facebook/wav2vec2-base-960h"
+  freeze: true
+  output_dim: 768
+
+# --- Text Encoder ---
+text_encoder:
+  name: "bert"
+  model_id: "bert-base-uncased"
+  freeze: true
+  output_dim: 768
+  pooling: "cls"                 # "cls" or "mean"
+
+# --- Model ---
+model:
+  name: "late_fusion"            # "late_fusion" | "cross_attention" | "mamba_fusion" | "mamba_dual_head"
+  hidden_dim: 256
+  dropout: 0.3
+  num_heads: 8                   # for cross-attention models
+  num_layers: 6                  # Mamba/Transformer layers per modality
+
+# --- Mamba-specific (used when model uses Mamba blocks) ---
+mamba:
+  d_model: 256
+  d_state: 16
+  d_conv: 4
+  expand: 2
+
+# --- V-A Head (used in mamba_dual_head) ---
+va_head:
+  grid_size: 9                   # 9×9 V-A probability matrix
+  v_range: [1.0, 5.0]
+  a_range: [1.0, 5.0]
+  sigma: 0.5                    # Gaussian smoothing for soft targets
+  loss_weight: 0.3              # α for multi-task: total = (1-α)*CE + α*KL
+
+# --- Training ---
+training:
+  epochs: 30
+  batch_size: 32
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: "cosine"            # "cosine" | "step" | "none"
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  early_stopping_patience: 7
+  class_weights: [1.0, 0.67, 1.0, 1.02]  # from analysis: Angry, Happy, Sad, Neutral
+
+# --- Evaluation ---
+evaluation:
+  loso_folds: 5                  # Leave-One-Session-Out
+  metrics: ["wa", "ua", "f1_macro", "f1_weighted"]
+  save_confusion_matrix: true
+  save_best_model: true
+
+# --- Hardware ---
+hardware:
+  device: "cuda"
+  num_workers: 15
+  pin_memory: true
+  mixed_precision: true          # AMP for faster training
+  seed: 42
