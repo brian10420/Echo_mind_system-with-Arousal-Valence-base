@@ -85,7 +85,6 @@ class TextEncoder(nn.Module):
     def train(self, mode: bool = True):
         """Override to keep encoder in eval mode when frozen."""
         super().train(mode)
-        # Always keep the pretrained model in eval mode
         self.model.eval()
         return self
 
@@ -101,7 +100,7 @@ class AudioEncoder(nn.Module):
     
     def __init__(
         self,
-        model_id: str = "facebook/wav2vec-2.0-base-960h",
+        model_id: str = "facebook/wav2vec2-base-960h",
         freeze: bool = True,
         output_dim: int = 768,
     ):
@@ -144,12 +143,8 @@ class AudioEncoder(nn.Module):
         
         sequence = outputs.last_hidden_state  # (B, T, 768)
         
-        # Create frame-level attention mask
-        # Wav2Vec2.0 downsamples by ~320x, so we need to compute the output mask
-        if hasattr(outputs, 'extract_features') and outputs.extract_features is not None:
-            frame_mask = self._compute_frame_mask(attention_mask, sequence.shape[1])
-        else:
-            frame_mask = self._compute_frame_mask(attention_mask, sequence.shape[1])
+        # Compute frame-level attention mask (vectorized)
+        frame_mask = self._compute_frame_mask(attention_mask, sequence.shape[1])
         
         # Masked mean pooling
         mask = frame_mask.unsqueeze(-1).float()  # (B, T, 1)
@@ -160,18 +155,22 @@ class AudioEncoder(nn.Module):
     def _compute_frame_mask(
         self, sample_mask: torch.Tensor, num_frames: int
     ) -> torch.Tensor:
-        """Compute frame-level mask from sample-level mask.
+        """Compute frame-level mask from sample-level mask (vectorized).
         
-        Wav2Vec2.0 downsamples ~320x, so we approximate:
-        valid_frames ≈ valid_samples / 320
+        Wav2Vec2.0 downsamples ~320x, so:
+            valid_frames ≈ valid_samples / 320
+        
+        Args:
+            sample_mask: (B, num_samples) True = valid
+            num_frames: Number of output frames T
+            
+        Returns:
+            (B, T) True = valid frame
         """
-        # Count valid samples per batch element
         valid_samples = sample_mask.sum(dim=1)  # (B,)
-        # Approximate number of valid frames
         valid_frames = (valid_samples / 320).long().clamp(min=1, max=num_frames)
         
-        # Build mask with broadcasting — no loop
-        # arange: (1, num_frames), valid_frames: (B, 1)
+        # Vectorized: broadcast arange (1, T) < valid_frames (B, 1) → (B, T)
         frame_indices = torch.arange(num_frames, device=sample_mask.device).unsqueeze(0)
         frame_mask = frame_indices < valid_frames.unsqueeze(1)
         
