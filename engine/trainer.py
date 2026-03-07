@@ -3,6 +3,10 @@ Trainer — Shared training loop for all models
 ==============================================
 Handles: training loop, validation, AMP, gradient clipping,
 learning rate scheduling, early stopping, checkpointing.
+
+Supports:
+- Per-module learning rates via model.get_param_groups()
+- Multi-task loss for dual-head models (CE + KL)
 """
 
 import logging
@@ -50,13 +54,35 @@ class Trainer:
         ).to(device)
         self.criterion = nn.CrossEntropyLoss(weight=class_weights)
         
-        # Optimizer — only trainable params
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=train_cfg["learning_rate"],
-            weight_decay=train_cfg["weight_decay"],
-        )
+        # Multi-task loss weight (for dual-head models)
+        # total_loss = (1 - va_weight) * CE + va_weight * KL
+        va_cfg = cfg.get("va_head", {})
+        self.va_loss_weight = va_cfg.get("loss_weight", 0.3)
+        self.use_multitask = cfg["model"]["name"] == "mamba_dual_head"
+        
+        if self.use_multitask:
+            logger.info(
+                f"Multi-task loss: {1 - self.va_loss_weight:.1f} × CE + "
+                f"{self.va_loss_weight:.1f} × KL"
+            )
+        
+        # Optimizer — supports per-module learning rates
+        base_lr = train_cfg["learning_rate"]
+        
+        if hasattr(model, 'get_param_groups'):
+            param_groups = model.get_param_groups(base_lr=base_lr)
+            logger.info(f"Using per-module learning rates ({len(param_groups)} groups)")
+            self.optimizer = torch.optim.AdamW(
+                param_groups,
+                weight_decay=train_cfg["weight_decay"],
+            )
+        else:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            self.optimizer = torch.optim.AdamW(
+                trainable_params,
+                lr=base_lr,
+                weight_decay=train_cfg["weight_decay"],
+            )
         
         # Scheduler
         self.epochs = train_cfg["epochs"]
@@ -87,9 +113,6 @@ class Trainer:
     def _build_scheduler(self, train_cfg: dict):
         """Build learning rate scheduler."""
         scheduler_type = train_cfg.get("scheduler", "cosine")
-        warmup_ratio = train_cfg.get("warmup_ratio", 0.1)
-        total_steps = self.epochs  # step per epoch
-        warmup_steps = int(total_steps * warmup_ratio)
         
         if scheduler_type == "cosine":
             from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -100,30 +123,41 @@ class Trainer:
         else:
             return None
     
-    def train_epoch(self, dataloader: DataLoader) -> float:
-        """Run one training epoch.
+    def _compute_loss(self, outputs: dict, batch: dict) -> torch.Tensor:
+        """Compute loss — supports both single-task and multi-task.
         
-        Returns:
-            Average training loss for the epoch.
+        Single-task (late_fusion, cross_attention, mamba_fusion):
+            loss = CrossEntropy(logits, labels)
+            
+        Multi-task (mamba_dual_head):
+            loss = (1-α) × CrossEntropy + α × KL-divergence
         """
+        ce_loss = self.criterion(outputs["logits"], batch["labels"])
+        
+        if self.use_multitask and "va_loss" in outputs:
+            va_loss = outputs["va_loss"]
+            total_loss = (1 - self.va_loss_weight) * ce_loss + self.va_loss_weight * va_loss
+            return total_loss
+        
+        return ce_loss
+    
+    def train_epoch(self, dataloader: DataLoader) -> float:
+        """Run one training epoch."""
         self.model.train()
         total_loss = 0.0
         num_batches = 0
         
         for batch in dataloader:
-            # Move to device
             batch = self._to_device(batch)
-            
             self.optimizer.zero_grad()
             
             if self.use_amp:
                 with autocast("cuda"):
                     outputs = self.model(batch)
-                    loss = self.criterion(outputs["logits"], batch["labels"])
+                    loss = self._compute_loss(outputs, batch)
                 
                 self.scaler.scale(loss).backward()
                 
-                # Gradient clipping
                 if self.gradient_clip > 0:
                     self.scaler.unscale_(self.optimizer)
                     nn.utils.clip_grad_norm_(
@@ -135,7 +169,7 @@ class Trainer:
                 self.scaler.update()
             else:
                 outputs = self.model(batch)
-                loss = self.criterion(outputs["logits"], batch["labels"])
+                loss = self._compute_loss(outputs, batch)
                 loss.backward()
                 
                 if self.gradient_clip > 0:
@@ -156,11 +190,7 @@ class Trainer:
     
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader) -> EvalResult:
-        """Run evaluation on a dataloader.
-        
-        Returns:
-            EvalResult with all metrics.
-        """
+        """Run evaluation on a dataloader."""
         self.model.eval()
         all_preds = []
         all_labels = []
@@ -172,10 +202,10 @@ class Trainer:
             if self.use_amp:
                 with autocast("cuda"):
                     outputs = self.model(batch)
-                    loss = self.criterion(outputs["logits"], batch["labels"])
+                    loss = self._compute_loss(outputs, batch)
             else:
                 outputs = self.model(batch)
-                loss = self.criterion(outputs["logits"], batch["labels"])
+                loss = self._compute_loss(outputs, batch)
             
             preds = outputs["logits"].argmax(dim=-1).cpu().tolist()
             labels = batch["labels"].cpu().tolist()
@@ -188,70 +218,70 @@ class Trainer:
         return result
     
     def fit(
-            self,
-            train_loader: DataLoader,
-            val_loader: DataLoader,
-        ) -> EvalResult:
-            """Full training loop with early stopping."""
-            logger.info(f"Starting training: {self.epochs} epochs, fold {self.fold_idx}")
-            best_result = None
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+    ) -> EvalResult:
+        """Full training loop with early stopping."""
+        logger.info(f"Starting training: {self.epochs} epochs, fold {self.fold_idx}")
+        best_result = None
+        
+        for epoch in range(1, self.epochs + 1):
+            t_start = time.time()
             
-            for epoch in range(1, self.epochs + 1):
-                t_start = time.time()
-                
-                # Train
-                train_loss = self.train_epoch(train_loader)
-                
-                # Evaluate
-                val_result = self.evaluate(val_loader)
-                
-                t_elapsed = time.time() - t_start
-                lr = self.optimizer.param_groups[0]['lr']
-                
-                logger.info(
-                    f"Fold {self.fold_idx + 1} | Epoch {epoch:3d}/{self.epochs} | "
-                    f"Train Loss: {train_loss:.4f} | "
-                    f"{val_result.summary('Val: ')} | "
-                    f"LR: {lr:.2e} | Time: {t_elapsed:.1f}s"
-                )
-                
-                # Early stopping on UA (standard for IEMOCAP)
-                if val_result.ua > self.best_ua:
-                    self.best_ua = val_result.ua
-                    self.patience_counter = 0
-                    best_result = val_result
-                    
-                    # Save best model state
-                    self.best_state = {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    }
-                    
-                    if self.cfg["evaluation"].get("save_best_model", True):
-                        ckpt_path = self.output_dir / "best_model.pt"
-                        torch.save(self.best_state, ckpt_path)
-                        logger.info(f"  ★ New best UA={self.best_ua:.4f}, saved to {ckpt_path}")
-                else:
-                    self.patience_counter += 1
-                    if self.patience_counter >= self.patience:
-                        logger.info(
-                            f"  Early stopping at epoch {epoch} "
-                            f"(no improvement for {self.patience} epochs)"
-                        )
-                        break
+            # Train
+            train_loss = self.train_epoch(train_loader)
             
-            # Load best model for final evaluation
-            if self.best_state is not None:
-                self.model.load_state_dict(self.best_state)
+            # Evaluate
+            val_result = self.evaluate(val_loader)
             
-            # Save confusion matrix
-            if best_result is not None and self.cfg["evaluation"].get("save_confusion_matrix", True):
-                self.evaluator.save_confusion_matrix(
-                    best_result,
-                    self.output_dir / "confusion_matrix.png",
-                    title=f"Fold {self.fold_idx + 1} — {self.cfg['model']['name']}",
-                )
+            t_elapsed = time.time() - t_start
+            lr = self.optimizer.param_groups[0]['lr']
             
-            return best_result
+            logger.info(
+                f"Fold {self.fold_idx + 1} | Epoch {epoch:3d}/{self.epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"{val_result.summary('Val: ')} | "
+                f"LR: {lr:.2e} | Time: {t_elapsed:.1f}s"
+            )
+            
+            # Early stopping on UA
+            if val_result.ua > self.best_ua:
+                self.best_ua = val_result.ua
+                self.patience_counter = 0
+                best_result = val_result
+                
+                # Save best model state
+                self.best_state = {
+                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                }
+                
+                if self.cfg["evaluation"].get("save_best_model", True):
+                    ckpt_path = self.output_dir / "best_model.pt"
+                    torch.save(self.best_state, ckpt_path)
+                    logger.info(f"  ★ New best UA={self.best_ua:.4f}, saved to {ckpt_path}")
+            else:
+                self.patience_counter += 1
+                if self.patience_counter >= self.patience:
+                    logger.info(
+                        f"  Early stopping at epoch {epoch} "
+                        f"(no improvement for {self.patience} epochs)"
+                    )
+                    break
+        
+        # Load best model for final evaluation
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
+        
+        # Save confusion matrix
+        if best_result is not None and self.cfg["evaluation"].get("save_confusion_matrix", True):
+            self.evaluator.save_confusion_matrix(
+                best_result,
+                self.output_dir / "confusion_matrix.png",
+                title=f"Fold {self.fold_idx + 1} — {self.cfg['model']['name']}",
+            )
+        
+        return best_result
     
     def _to_device(self, batch: dict) -> dict:
         """Move batch tensors to device."""

@@ -1,31 +1,94 @@
 """
 Model Registry — Maps config names to model classes
 ====================================================
+Adding a new model:
+    1. Create your model class with the standard interface
+    2. Add one line to MODEL_REGISTRY below
+    That's it. build_model() auto-dispatches kwargs based on __init__ signature.
+
 Usage:
-    model = build_model(cfg, text_encoder, audio_encoder)
+    text_enc, audio_enc = build_encoders(cfg)
+    model = build_model(cfg, text_enc, audio_enc)
 """
 
+import inspect
 import logging
+from typing import Union
+
+import torch.nn as nn
 
 from models.encoders import TextEncoder, AudioEncoder
 from models.baseline_late_fusion import LateFusionBaseline
 from models.baseline_cross_attention import CrossAttentionTransformer
 from models.mamba_fusion import MambaFusion
+from models.mamba_dual_head import MambaDualHead
 
 logger = logging.getLogger(__name__)
 
-# Registry: model_name → class
-MODEL_REGISTRY = {
+# ──────────────────────────────────────────────────────────────
+# Registry: model name (str) → model class
+# To add a new model, just add one line here.
+# ──────────────────────────────────────────────────────────────
+
+MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "late_fusion": LateFusionBaseline,
     "cross_attention": CrossAttentionTransformer,
     "mamba_fusion": MambaFusion,
-    # Future:
-    # "mamba_dual_head": MambaDualHead,
+    "mamba_dual_head": MambaDualHead,
+}
+
+# ──────────────────────────────────────────────────────────────
+# Config key → constructor kwarg mapping
+# Maps each possible kwarg name to where it lives in the config.
+# build_model() only passes kwargs that the model actually accepts.
+# ──────────────────────────────────────────────────────────────
+
+_KWARG_SOURCES: dict[str, tuple[str, ...]] = {
+    # kwarg name         → (config section, key)
+    "text_encoder":       (),                          # passed directly
+    "audio_encoder":      (),                          # passed directly
+    "num_classes":        ("dataset", "num_classes"),
+    "hidden_dim":         ("model", "hidden_dim"),
+    "dropout":            ("model", "dropout"),
+    "num_heads":          ("model", "num_heads"),
+    "num_layers":         ("model", "num_layers"),
+    "dim_feedforward":    ("model", "dim_feedforward"),
+    "num_cross_layers":   ("model", "num_cross_layers"),
+    "mamba_config":       ("mamba",),
+    "va_config":          ("va_head",),
 }
 
 
+def _resolve_kwarg(key: str, cfg: dict, direct_kwargs: dict):
+    """Resolve a single kwarg value from config or direct kwargs."""
+    # Direct kwargs (text_encoder, audio_encoder) take priority
+    if key in direct_kwargs:
+        return direct_kwargs[key]
+    
+    path = _KWARG_SOURCES.get(key)
+    if path is None or len(path) == 0:
+        return None
+    
+    # Walk the config path
+    value = cfg
+    for segment in path:
+        if isinstance(value, dict) and segment in value:
+            value = value[segment]
+        else:
+            return None  # not found in config
+    
+    return value
+
+
 def build_encoders(cfg: dict) -> tuple[TextEncoder, AudioEncoder]:
-    """Build frozen text and audio encoders from config."""
+    """Build frozen text and audio encoders from config.
+    
+    Args:
+        cfg: Full config dict (parsed from YAML)
+        
+    Returns:
+        (text_encoder, audio_encoder) tuple
+    """
     text_encoder = TextEncoder(
         model_id=cfg["text_encoder"]["model_id"],
         freeze=cfg["text_encoder"]["freeze"],
@@ -46,8 +109,11 @@ def build_model(
     cfg: dict,
     text_encoder: TextEncoder,
     audio_encoder: AudioEncoder,
-) -> LateFusionBaseline:
-    """Build model from config.
+) -> nn.Module:
+    """Build model from config using automatic kwarg dispatch.
+    
+    Inspects the model class __init__ signature and only passes
+    kwargs that the class actually accepts. No if-statements needed.
     
     Args:
         cfg: Full config dict
@@ -65,28 +131,24 @@ def build_model(
     
     model_cls = MODEL_REGISTRY[model_name]
     
-    # Common kwargs shared by all models
-    kwargs = {
+    # Inspect what kwargs the model class accepts
+    sig = inspect.signature(model_cls.__init__)
+    accepted_params = set(sig.parameters.keys()) - {"self"}
+    
+    # Direct kwargs (not from config)
+    direct = {
         "text_encoder": text_encoder,
         "audio_encoder": audio_encoder,
-        "num_classes": cfg["dataset"]["num_classes"],
-        "hidden_dim": cfg["model"]["hidden_dim"],
-        "dropout": cfg["model"]["dropout"],
     }
     
-    # Model-specific kwargs for models with temporal + cross-attention layers
-    if model_name in ("cross_attention", "mamba_fusion", "mamba_dual_head"):
-        kwargs["num_heads"] = cfg["model"]["num_heads"]
-        kwargs["num_layers"] = cfg["model"]["num_layers"]
+    # Build kwargs dict: only include what the model accepts
+    kwargs = {}
+    for param_name in accepted_params:
+        value = _resolve_kwarg(param_name, cfg, direct)
+        if value is not None:
+            kwargs[param_name] = value
     
-    # Mamba-specific config
-    if model_name in ("mamba_fusion", "mamba_dual_head"):
-        kwargs["mamba_config"] = cfg.get("mamba", {})
-    
-    # Dual-head V-A config
-    if model_name == "mamba_dual_head":
-        kwargs["va_config"] = cfg.get("va_head", {})
-    
+    # Build model
     model = model_cls(**kwargs)
     
     trainable = model.get_trainable_params()
@@ -94,7 +156,7 @@ def build_model(
     logger.info(
         f"Model '{model_name}' built: "
         f"{trainable:,} trainable / {total:,} total params "
-        f"({trainable/total*100:.1f}% trainable)"
+        f"({trainable / total * 100:.1f}% trainable)"
     )
     
     return model
