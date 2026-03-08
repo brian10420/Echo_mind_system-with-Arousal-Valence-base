@@ -81,7 +81,7 @@ uv add soundfile
 ### Dataset Preparation
 
 1. Download IEMOCAP from [USC SAIL](https://sail.usc.edu/iemocap/)
-2. Extract to `/data/Brian/Dataset/IEMOCAP_full_release/` (or update `configs/base.yaml`)
+2. Extract to `/Dataset/IEMOCAP_full_release/` (or update `configs/base.yaml`)
 3. Run the explorer to generate the CSV index:
 
 ```bash
