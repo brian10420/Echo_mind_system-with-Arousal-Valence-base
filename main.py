@@ -230,9 +230,11 @@ def main():
     logger.info(f"Encoders loaded in {time.time() - t_start:.1f}s")
     
     # --- Build collator ---
+    # audio_model_id is only needed for wav2vec2; raw_conv handles padding itself
+    audio_enc_type = cfg["audio_encoder"].get("type", "wav2vec2")
     collator = MultimodalCollator(
         text_model_id=cfg["text_encoder"]["model_id"],
-        audio_model_id=cfg["audio_encoder"]["model_id"],
+        audio_model_id=cfg["audio_encoder"].get("model_id") if audio_enc_type == "wav2vec2" else None,
         max_text_tokens=cfg["dataset"]["max_text_tokens"],
         audio_sample_rate=cfg["dataset"]["audio_sample_rate"],
     )
@@ -290,7 +292,7 @@ def main():
         logger.info(f"Fold {fold_idx + 1} DONE: {result.summary()}")
     
     # --- Aggregate results ---
-    if len(fold_results) > 1:
+    if len(fold_results) >= 1:
         logger.info(f"\n{'=' * 70}")
         logger.info("LOSO CROSS-VALIDATION RESULTS")
         logger.info(f"{'=' * 70}")

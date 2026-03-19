@@ -107,6 +107,7 @@ class AudioEncoder(nn.Module):
         super().__init__()
         self.model = Wav2Vec2Model.from_pretrained(model_id)
         self.output_dim = output_dim
+        self.frame_stride = 320   # Wav2Vec2 CNN downsamples 320× (fixed)
         
         if freeze:
             self._freeze()

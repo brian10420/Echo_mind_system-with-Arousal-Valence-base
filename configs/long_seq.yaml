@@ -1,0 +1,119 @@
+# ============================================================
+# Long-Sequence Experiment Config
+# ============================================================
+# Tests Mamba's O(N) advantage by replacing Wav2Vec2 (T≈550)
+# with a trainable Conv1d encoder (T≈2750) — 5× longer sequences.
+#
+# Steps:
+#   1. (Optional but recommended) Pre-train the encoder:
+#      uv run pretrain/pretrain_encoder.py --data-dir ./data --epochs 20
+#
+#   2. Set checkpoint below after pre-training, then run:
+#      uv run main.py --config configs/long_seq.yaml --model mamba_fusion
+#      uv run main.py --config configs/long_seq.yaml --model cross_attention
+#
+#   Compare UA/training-time between these two runs to see
+#   Mamba's advantage emerge at longer sequence lengths.
+# ============================================================
+
+# --- Paths ---
+paths:
+  iemocap_root: "/data/Brian/Dataset/IEMOCAP_full_release"
+  output_dir: "./outputs/long_seq"
+  cache_dir: "./cache"
+
+# --- Dataset ---
+dataset:
+  num_classes: 4
+  max_audio_sec: 11.0        # IEMOCAP utterances max out here; longer cap doesn't help
+  audio_sample_rate: 16000
+  max_text_tokens: 48
+  label_map:
+    ang: 0
+    hap: 1
+    exc: 1
+    sad: 2
+    neu: 3
+
+# --- Audio Encoder: RawAudioEncoder (replaces Wav2Vec2) ---
+# type: "raw_conv" activates RawAudioEncoder in build_encoders()
+# frame_stride = 4×4×4 = 64  →  T = 176,000/64 = 2,750 for 11s audio
+# Compare to Wav2Vec2: T = 176,000/320 = 550
+audio_encoder:
+  type: "raw_conv"
+  output_dim: 768            # must match what audio_proj Linear(768→hidden_dim) expects
+  stride_config: [4, 4, 4]   # total 64× → 250 fps → T≈2750 for 11s
+  channels: [64, 256, 512]
+  dropout: 0.1
+  freeze: true              # set true if loading a pre-trained checkpoint
+  checkpoint: "pretrain/checkpoints/raw_audio_encoder_best.pt"           # set to "pretrain/checkpoints/raw_audio_encoder_best.pt"
+                             # after running pretrain/pretrain_encoder.py
+
+# --- Text Encoder (unchanged from base.yaml) ---
+text_encoder:
+  name: "bert"
+  model_id: "bert-base-uncased"
+  freeze: true
+  output_dim: 768
+  pooling: "cls"
+
+# --- Model ---
+model:
+  name: "mamba_v2_fusion"    # compare: "mamba_v2_fusion" vs "mamba_fusion" vs "cross_attention"
+  hidden_dim: 256
+  dropout: 0.3
+  num_heads: 8
+  num_layers: 6
+
+# --- Mamba v1 config (unchanged) ---
+mamba:
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  bidirectional: true
+
+# --- Mamba v2 config (unchanged) ---
+mamba_v2:
+  d_state: 128
+  d_conv: 4
+  expand: 2
+  headdim: 64
+  bidirectional: true
+
+# --- V-A Head ---
+va_head:
+  grid_size: 9
+  v_range: [1.0, 5.0]
+  a_range: [1.0, 5.0]
+  sigma: 0.5
+  loss_weight: 0.3
+
+# --- Training ---
+# Reduced batch_size: T=2750 audio tensors are ~5× larger than T=550
+# 16 × 2750 × 256 × 4 bytes ≈ 45MB per forward pass (manageable on RTX 4090)
+# cross_attention self-attention on T=2750: 2750² × 8heads — watch VRAM
+training:
+  epochs: 30
+  batch_size: 32             # reduced from 32 (longer sequences, more memory)
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: "cosine"
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  early_stopping_patience: 7
+  class_weights: [1.0, 0.67, 1.0, 1.02]
+
+# --- Evaluation ---
+evaluation:
+  loso_folds: 5
+  metrics: ["wa", "ua", "f1_macro", "f1_weighted"]
+  save_confusion_matrix: true
+  save_best_model: true
+
+# --- Hardware ---
+hardware:
+  device: "cuda"
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true
+  seed: 42

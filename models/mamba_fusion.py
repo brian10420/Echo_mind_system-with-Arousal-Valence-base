@@ -212,7 +212,7 @@ class MambaFusion(nn.Module):
     def _compute_audio_frame_mask(self, sample_mask, num_frames):
         """Compute frame-level mask from sample-level mask (vectorized)."""
         valid_samples = sample_mask.sum(dim=1)
-        valid_frames = (valid_samples / 320).long().clamp(min=1, max=num_frames)
+        valid_frames = (valid_samples / self.audio_encoder.frame_stride).long().clamp(min=1, max=num_frames)
         frame_indices = torch.arange(num_frames, device=sample_mask.device).unsqueeze(0)
         frame_mask = frame_indices < valid_frames.unsqueeze(1)
         return frame_mask

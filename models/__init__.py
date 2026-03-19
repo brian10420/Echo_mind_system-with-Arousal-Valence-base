@@ -22,6 +22,8 @@ from models.baseline_late_fusion import LateFusionBaseline
 from models.baseline_cross_attention import CrossAttentionTransformer
 from models.mamba_fusion import MambaFusion
 from models.mamba_dual_head import MambaDualHead
+from models.mamba_v2_fusion import MambaV2Fusion
+from models.mamba_v2_dual_head import MambaV2DualHead
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "cross_attention": CrossAttentionTransformer,
     "mamba_fusion": MambaFusion,
     "mamba_dual_head": MambaDualHead,
+    "mamba_v2_fusion": MambaV2Fusion,
+    "mamba_v2_dual_head": MambaV2DualHead,
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -55,6 +59,7 @@ _KWARG_SOURCES: dict[str, tuple[str, ...]] = {
     "dim_feedforward":    ("model", "dim_feedforward"),
     "num_cross_layers":   ("model", "num_cross_layers"),
     "mamba_config":       ("mamba",),
+    "mamba_v2_config":    ("mamba_v2",),
     "va_config":          ("va_head",),
 }
 
@@ -81,11 +86,15 @@ def _resolve_kwarg(key: str, cfg: dict, direct_kwargs: dict):
 
 
 def build_encoders(cfg: dict) -> tuple[TextEncoder, AudioEncoder]:
-    """Build frozen text and audio encoders from config.
-    
+    """Build text and audio encoders from config.
+
+    Supports two audio encoder backends, selected by cfg["audio_encoder"]["type"]:
+        "wav2vec2"  (default) — frozen Wav2Vec2-base-960h, 320× downsample, T≈550
+        "raw_conv"            — trainable Conv1d stack, configurable downsample, T≈2750
+
     Args:
         cfg: Full config dict (parsed from YAML)
-        
+
     Returns:
         (text_encoder, audio_encoder) tuple
     """
@@ -95,13 +104,30 @@ def build_encoders(cfg: dict) -> tuple[TextEncoder, AudioEncoder]:
         pooling=cfg["text_encoder"]["pooling"],
         output_dim=cfg["text_encoder"]["output_dim"],
     )
-    
-    audio_encoder = AudioEncoder(
-        model_id=cfg["audio_encoder"]["model_id"],
-        freeze=cfg["audio_encoder"]["freeze"],
-        output_dim=cfg["audio_encoder"]["output_dim"],
-    )
-    
+
+    encoder_type = cfg["audio_encoder"].get("type", "wav2vec2")
+
+    if encoder_type == "raw_conv":
+        from models.encoders_raw import RawAudioEncoder
+        audio_encoder = RawAudioEncoder(
+            output_dim=cfg["audio_encoder"]["output_dim"],
+            stride_config=cfg["audio_encoder"].get("stride_config", [4, 4, 4]),
+            channels=cfg["audio_encoder"].get("channels", [64, 256, 512]),
+            dropout=cfg["audio_encoder"].get("dropout", 0.1),
+            freeze=cfg["audio_encoder"].get("freeze", False),
+            checkpoint=cfg["audio_encoder"].get("checkpoint", None),
+        )
+        logger.info(
+            f"AudioEncoder: raw_conv (frame_stride={audio_encoder.frame_stride}×, "
+            f"trainable, freeze={cfg['audio_encoder'].get('freeze', False)})"
+        )
+    else:
+        audio_encoder = AudioEncoder(
+            model_id=cfg["audio_encoder"]["model_id"],
+            freeze=cfg["audio_encoder"]["freeze"],
+            output_dim=cfg["audio_encoder"]["output_dim"],
+        )
+
     return text_encoder, audio_encoder
 
 

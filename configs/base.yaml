@@ -44,13 +44,23 @@ model:
   num_heads: 8
   num_layers: 6
 
-# --- Mamba-specific ---
+# --- Mamba v1 config ---
 mamba:
   d_model: 256
   d_state: 16
   d_conv: 4
   expand: 2
   bidirectional: true       # forward + backward scan
+
+# --- Mamba v2 config (Mamba2 / SSD) ---
+# Constraint: (hidden_dim * expand) must be divisible by headdim
+# Default: (256 * 2) / 64 = 8 heads
+mamba_v2:
+  d_state: 128              # larger state than v1 (16 → 128), richer SSM dynamics
+  d_conv: 4
+  expand: 2
+  headdim: 64               # new v2 param: per-head dim → nheads = (256*2)/64 = 8
+  bidirectional: true
 
 # --- V-A Head (future) ---
 va_head:

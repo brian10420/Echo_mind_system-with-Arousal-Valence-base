@@ -222,8 +222,8 @@ class CrossAttentionTransformer(nn.Module):
         )
         
         # ── Positional encoding ──
-        self.audio_pe = SinusoidalPositionalEncoding(hidden_dim, max_len=1024, dropout=dropout)
-        self.text_pe = SinusoidalPositionalEncoding(hidden_dim, max_len=128, dropout=dropout)
+        self.audio_pe = SinusoidalPositionalEncoding(hidden_dim, max_len=4096, dropout=dropout)
+        self.text_pe = SinusoidalPositionalEncoding(hidden_dim, max_len=512, dropout=dropout)
         
         # ── Per-modality Transformer encoders (self-attention) ──
         audio_encoder_layer = nn.TransformerEncoderLayer(
@@ -308,8 +308,8 @@ class CrossAttentionTransformer(nn.Module):
             (B, num_frames) True = valid frame
         """
         valid_samples = sample_mask.sum(dim=1)  # (B,)
-        valid_frames = (valid_samples / 320).long().clamp(min=1, max=num_frames)
-        
+        valid_frames = (valid_samples / self.audio_encoder.frame_stride).long().clamp(min=1, max=num_frames)
+
         # Vectorized mask creation — no Python loop
         frame_indices = torch.arange(num_frames, device=sample_mask.device).unsqueeze(0)  # (1, T)
         frame_mask = frame_indices < valid_frames.unsqueeze(1)  # (B, T)
